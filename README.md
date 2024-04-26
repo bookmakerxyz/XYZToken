@@ -1,2 +1,1 @@
-# XYZToken
-XYZToken + Vesting
+# XYZ Token + Vesting
