@@ -1,12 +1,10 @@
 const { ethers } = require("hardhat");
-const { deployXYZToken, getTimeout, deployVesting } = require("../utils/utils");
+const { getTimeout, deployVesting } = require("../utils/utils");
 require("dotenv").config();
 
 async function main() {
   const chainId = await network.provider.send("eth_chainId");
   const timeout = getTimeout(chainId);
-
-  const [owner] = await ethers.getSigners();
 
   // ** ENV *** ENV **
   const OWNER = process.env.OWNER;

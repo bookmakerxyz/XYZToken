@@ -5,17 +5,17 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract Vesting is OwnableUpgradeable {
-    using SafeERC20 for IERC20;
-
     struct AllocParams {
         address investor;
         uint128 vestAmount;
         uint64 lockupPeriod;
         uint64 vestingPeriod;
+        uint64 instantShare; // 0-100% share of vestAmount tokens to be instantly vested
     }
 
     struct VestingParams {
         uint128 vestAmount; // amount of "vestedToken" that is already on vesting
+        uint128 instantVestAmount; // amount of token to be instant vested
         uint64 lockupPeriod; // period of time in seconds during which tokens cannot be claimed
         uint64 vestingPeriod; // time period of linear tokens unlock
         uint128 claimedAmount; // counter of already claimed vested tokens
@@ -36,12 +36,20 @@ contract Vesting is OwnableUpgradeable {
     /// @notice Mapping of addresses to lists of their vesting IDs
     mapping(address => uint256[]) public vestingIds;
 
+    /// @notice Mapping of addresses to boolean values indicates that it can maintain allocations
+    mapping(address => bool) public maintainers;
+
     /// @notice Last vesting object ID (1-based)
     uint256 public lastVestingId;
 
     event Claimed(address indexed account, uint256 indexed id, uint256 amount);
+    event MaintainerUpdated(address indexed account, bool isMaintainer);
     event VestingBeginSet(uint256 vestingBeginTime);
-    event Allocated(address[] investors, uint256[] ids);
+    event Allocated(
+        address indexed allocator,
+        address[] investors,
+        uint256[] ids
+    );
 
     error IncorrectVestingBegin();
     error IncorrectVestingPeriod();
@@ -50,6 +58,9 @@ contract Vesting is OwnableUpgradeable {
     error VestingAlreadyStarted();
     error BeginIsNotSet();
     error NotApplicableForVestedToken();
+    error IncorrectInstantShare();
+    error NothingChanged();
+    error OnlyMaintainer();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -91,7 +102,7 @@ contract Vesting is OwnableUpgradeable {
             }
         }
         if (totalAmount == 0) revert ZeroAmount();
-        vestedToken.safeTransfer(account, totalAmount);
+        vestedToken.transfer(account, totalAmount);
     }
 
     // RESTRICTED FUNCTIONS
@@ -117,11 +128,25 @@ contract Vesting is OwnableUpgradeable {
     }
 
     /**
+     * @notice Updates the maintainer status of an account.
+     */
+    function updateMaintainer(
+        address account,
+        bool isMaintainer
+    ) external onlyOwner {
+        if (maintainers[account] == isMaintainer) revert NothingChanged();
+        maintainers[account] = isMaintainer;
+        emit MaintainerUpdated(account, isMaintainer);
+    }
+
+    /**
      * @notice Give vested token allocations to investors
      * @param allocParams Allocations parameters
      */
-    function allocate(AllocParams[] calldata allocParams) external onlyOwner {
-        _checkVestingBegin();
+    function allocate(AllocParams[] calldata allocParams) external {
+        if (msg.sender != owner() && !maintainers[msg.sender])
+            revert OnlyMaintainer();
+
         uint256 totalAmount;
         uint256 lastId = lastVestingId;
         uint256 length = allocParams.length;
@@ -129,15 +154,25 @@ contract Vesting is OwnableUpgradeable {
         VestingParams storage vesting;
         address[] memory investors = new address[](length);
         uint256[] memory ids = new uint256[](length);
+        uint128 instantVestAmount_;
+        uint128 vestAmount_;
 
         for (uint256 i = 0; i < length; ++i) {
             params = allocParams[i];
             if (params.vestAmount == 0) revert ZeroAmount();
             if (params.vestingPeriod == 0) revert IncorrectVestingPeriod();
+            if (params.instantShare > 100) revert IncorrectInstantShare();
 
             totalAmount += params.vestAmount;
             vesting = vestings[++lastId];
-            vesting.vestAmount = params.vestAmount;
+
+            instantVestAmount_ = (params.instantShare == 0)
+                ? 0
+                : ((params.vestAmount * params.instantShare) / 100);
+            vestAmount_ = params.vestAmount - instantVestAmount_;
+
+            vesting.vestAmount = vestAmount_;
+            vesting.instantVestAmount = instantVestAmount_;
             vesting.lockupPeriod = params.lockupPeriod;
             vesting.vestingPeriod = params.vestingPeriod;
 
@@ -146,8 +181,8 @@ contract Vesting is OwnableUpgradeable {
             ids[i] = lastId;
         }
         lastVestingId = lastId;
-        emit Allocated(investors, ids);
-        vestedToken.safeTransferFrom(msg.sender, address(this), totalAmount);
+        emit Allocated(msg.sender, investors, ids);
+        vestedToken.transferFrom(msg.sender, address(this), totalAmount);
     }
 
     /**
@@ -206,41 +241,49 @@ contract Vesting is OwnableUpgradeable {
      */
     function getBalanceOf(
         address account
-    ) public view returns (uint256 amount) {
+    ) external view returns (uint256 amount) {
         uint256[] memory ids = vestingIds[account];
+        VestingParams storage vestParams;
         for (uint256 i = 0; i < ids.length; ++i) {
-            VestingParams storage vestParams = vestings[ids[i]];
-            amount += vestParams.vestAmount - vestParams.claimedAmount;
+            vestParams = vestings[ids[i]];
+            amount +=
+                vestParams.vestAmount +
+                vestParams.instantVestAmount -
+                vestParams.claimedAmount;
         }
     }
 
     /**
      * @notice Get amount of available for claim tokens in exact vesting object
+     *         Instant vested tokens available after user lockup (vestingBegin + lockupPeriod) passed
      * @param vestingId ID of the vesting object
      * @return amount Amount of available tokens
      */
     function getAvailableBalance(
         uint256 vestingId
     ) public view returns (uint128 amount) {
+        if (vestingBegin == 0) return 0;
+
         VestingParams storage vestParams = vestings[vestingId];
         uint256 userVestingBegin_ = vestingBegin + vestParams.lockupPeriod;
+        if (block.timestamp < userVestingBegin_) return 0;
+
         uint256 userVestingEnd_ = userVestingBegin_ + vestParams.vestingPeriod;
+        uint128 instantVestAmount_ = vestParams.instantVestAmount;
+        uint128 vestAmount_ = vestParams.vestAmount;
+        uint128 claimedAmount_ = vestParams.claimedAmount;
 
-        if (block.timestamp < userVestingBegin_ || vestingBegin == 0) {
-            return 0;
-        }
-
-        if (block.timestamp >= userVestingEnd_) {
-            amount = vestParams.vestAmount - vestParams.claimedAmount;
-        } else {
-            amount = uint128(
-                (vestParams.vestAmount *
-                    (block.timestamp - userVestingBegin_)) /
-                    (userVestingEnd_ - userVestingBegin_) -
-                    vestParams.claimedAmount
-            );
-        }
-        return amount;
+        amount =
+            (
+                (block.timestamp < userVestingEnd_)
+                    ? uint128(
+                        (vestAmount_ * (block.timestamp - userVestingBegin_)) /
+                            (userVestingEnd_ - userVestingBegin_)
+                    )
+                    : vestAmount_
+            ) +
+            instantVestAmount_ -
+            claimedAmount_;
     }
 
     function _checkVestingBegin() internal view {

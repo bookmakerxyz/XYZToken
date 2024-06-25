@@ -58,16 +58,9 @@ function expectCloseTo(value, amountTo) {
 
 async function deployXYZToken(ethers, name, symbol) {
   const XYZToken = await ethers.getContractFactory("XYZToken");
-  let token = await upgrades.deployProxy(XYZToken, [name, symbol], { initializer: "initialize" });
+  let token = await XYZToken.deploy(name, symbol);
   await token.waitForDeployment();
   return token;
-}
-
-async function upgradeXYZToken(xyzTokenProxyAddress, Token) {
-  let xyzToken = await upgrades.upgradeProxy(xyzTokenProxyAddress, Token);
-  const xyzTokenImplAddress = await upgrades.erc1967.getImplementationAddress(xyzTokenProxyAddress);
-  await xyzToken.waitForDeployment();
-  return xyzTokenImplAddress;
 }
 
 async function deployVesting(ethers, tokenAddress, ownerAddress) {
@@ -75,6 +68,12 @@ async function deployVesting(ethers, tokenAddress, ownerAddress) {
   let vesting = await upgrades.deployProxy(VESTING, [tokenAddress, ownerAddress], { initializer: "initialize" });
   await vesting.waitForDeployment();
   return vesting;
+}
+
+function calcAmounts(allocVestAmount, allocInstantShare) {
+  let instantAmount = (BigInt(allocVestAmount) * BigInt(allocInstantShare)) / BigInt(100);
+  let vestAmount = BigInt(allocVestAmount) - instantAmount;
+  return { vestAmount, instantAmount };
 }
 
 function initFixtureTree(provider) {
@@ -118,6 +117,6 @@ module.exports = {
   expectCloseTo,
   tokens,
   deployXYZToken,
-  upgradeXYZToken,
   deployVesting,
+  calcAmounts,
 };

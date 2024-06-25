@@ -1,6 +1,6 @@
 const { ethers } = require("hardhat");
 const { expect } = require("chai");
-const { expectTuple, getTimeout } = require("../utils/utils");
+const { expectTuple, getTimeout, calcAmounts } = require("../utils/utils");
 const { BigNumber } = require("ethers");
 const { parse } = require("csv-parse/sync");
 const fs = require("fs");
@@ -62,7 +62,8 @@ async function main() {
     const vestObj = await vesting.vestings(vestId);
     const alloc = allocArray[i];
 
-    await expectTuple(vestObj, alloc.vestAmount, alloc.lockupPeriod, alloc.vestingPeriod, 0);
+    let { instantAmount, vestAmount } = calcAmounts(alloc.vestAmount, alloc.instantShare);
+    await expectTuple(vestObj, vestAmount, instantAmount, alloc.lockupPeriod, alloc.vestingPeriod);
     expect(await vesting.vestingIdsOf(alloc.investor)).to.deep.include(vestId);
 
     console.log("Vesting with id =", vestId, "is correct");

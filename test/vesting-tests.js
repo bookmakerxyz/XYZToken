@@ -9,8 +9,8 @@ const {
   expectCloseTo,
   tokens,
   deployXYZToken,
-  upgradeXYZToken,
   deployVesting,
+  calcAmounts,
 } = require("../utils/utils");
 const { BigNumber } = require("ethers");
 
@@ -22,7 +22,9 @@ describe("Vesting", () => {
   let alloc1, alloc2, alloc3, alloc4, alloc5;
   let vestingAddress, testTokenAddress;
 
-  const DAY = 60 * 60 * 24;
+  const MINUTE = 60;
+  const HOUR = MINUTE * 60;
+  const DAY = HOUR * 24;
   const YEAR = DAY * 365;
 
   const TOKENS_14500 = tokens("14500");
@@ -40,7 +42,7 @@ describe("Vesting", () => {
   async function deploy() {
     [owner, adr1, adr2, adr3, adr4] = await ethers.getSigners();
 
-    token = await deployXYZToken(ethers, "Bookmaker.xyz", "XYZ");
+    token = await deployXYZToken(ethers, "XYZToken", "XYZ");
     vesting = await deployVesting(ethers, await token.getAddress(), owner.address);
     vestingAddress = await vesting.getAddress();
     const TESTTOKEN = await ethers.getContractFactory("TestToken");
@@ -52,6 +54,7 @@ describe("Vesting", () => {
       vestAmount: TOKENS_1000,
       lockupPeriod: DAY * 100,
       vestingPeriod: YEAR,
+      instantShare: 0,
     };
 
     alloc2 = {
@@ -59,6 +62,7 @@ describe("Vesting", () => {
       vestAmount: TOKENS_600,
       lockupPeriod: DAY * 50,
       vestingPeriod: DAY * 150,
+      instantShare: 0,
     };
 
     alloc3 = {
@@ -66,6 +70,7 @@ describe("Vesting", () => {
       vestAmount: TOKENS_500,
       lockupPeriod: DAY * 50,
       vestingPeriod: DAY * 200,
+      instantShare: 0,
     };
 
     alloc4 = {
@@ -73,6 +78,7 @@ describe("Vesting", () => {
       vestAmount: TOKENS_200,
       lockupPeriod: DAY * 50,
       vestingPeriod: DAY * 200,
+      instantShare: 0,
     };
 
     alloc5 = {
@@ -80,22 +86,13 @@ describe("Vesting", () => {
       vestAmount: TOKENS_200,
       lockupPeriod: DAY * 50,
       vestingPeriod: DAY * 200,
+      instantShare: 0,
     };
   }
 
   wrapLayer(deploy);
 
-  it("Upgrade token test", async () => {
-    const XYZTokenV2 = await ethers.getContractFactory("XYZTokenV2");
-    const tokenProxyAddress = await token.getAddress();
-
-    await upgradeXYZToken(tokenProxyAddress, XYZTokenV2);
-    const tokenV2 = XYZTokenV2.attach(tokenProxyAddress);
-
-    expect(await tokenV2.version()).to.be.eq(2);
-  });
-
-  it("Should give allocations to investors", async () => {
+  it("Should give allocations to investors by the owner", async () => {
     expect(await vesting.lastVestingId()).to.be.eq(0);
     const balanceBefore = await token.balanceOf(owner.address);
     const balanceVestingBefore = await token.balanceOf(vestingAddress);
@@ -110,13 +107,34 @@ describe("Vesting", () => {
     expect(await vesting.vestingIdsOf(adr1.address)).to.eql([BN(1), BN(3)]);
     expect(await vesting.vestingCountOf(adr2.address)).to.be.eq(1);
     expect(await vesting.vestingIdsOf(adr2.address)).to.eql([BN(2)]);
-    await expectTuple(await vesting.vestings(1), TOKENS_1000, DAY * 100, YEAR);
-    await expectTuple(await vesting.vestings(2), TOKENS_600, DAY * 50, DAY * 150);
-    await expectTuple(await vesting.vestings(3), TOKENS_500, DAY * 50, DAY * 200);
-    await expectTuple(await vesting.vestings(4), TOKENS_200, DAY * 50, DAY * 200);
-    await expectTuple(await vesting.vestings(5), TOKENS_200, DAY * 50, DAY * 200);
+    await expectTuple(await vesting.vestings(1), TOKENS_1000, 0, DAY * 100, YEAR);
+    await expectTuple(await vesting.vestings(2), TOKENS_600, 0, DAY * 50, DAY * 150);
+    await expectTuple(await vesting.vestings(3), TOKENS_500, 0, DAY * 50, DAY * 200);
+    await expectTuple(await vesting.vestings(4), TOKENS_200, 0, DAY * 50, DAY * 200);
+    await expectTuple(await vesting.vestings(5), TOKENS_200, 0, DAY * 50, DAY * 200);
     expect(await token.balanceOf(owner.address)).to.be.eq(balanceBefore - tokens("2500"));
     expect(await token.balanceOf(vestingAddress)).to.be.eq(balanceVestingBefore + tokens("2500"));
+  });
+
+  it("Should give allocations to investors by a maintainer", async () => {
+    const balanceBefore = await token.balanceOf(owner.address);
+    const balanceVestingBefore = await token.balanceOf(vestingAddress);
+    expect(await vesting.vestingCountOf(adr1.address)).to.be.eq(0);
+
+    await vesting.connect(owner).updateMaintainer(adr1.address, true);
+    await token.connect(owner).transfer(adr1.address, TOKENS_1000);
+    await token.connect(adr1).approve(vestingAddress, TOKENS_1000);
+    await vesting.connect(adr1).allocate([alloc1]);
+
+    expect(await vesting.lastVestingId()).to.be.eq(1);
+    expect(await vesting.vestingCountOf(adr1.address)).to.be.eq(1);
+    await expectTuple(await vesting.vestings(1), TOKENS_1000, 0, DAY * 100, YEAR);
+    expect(await token.balanceOf(owner.address)).to.be.eq(balanceBefore - TOKENS_1000);
+    expect(await token.balanceOf(vestingAddress)).to.be.eq(balanceVestingBefore + TOKENS_1000);
+
+    // Remove maintenance
+    await vesting.connect(owner).updateMaintainer(adr1.address, false);
+    await expect(vesting.connect(adr1).allocate([alloc1])).to.be.revertedWithCustomError(vesting, "OnlyMaintainer");
   });
 
   it("Should allocate big array and claim", async () => {
@@ -146,6 +164,7 @@ describe("Vesting", () => {
       vestAmount: 0,
       lockupPeriod: 0,
       vestingPeriod: 0,
+      instantShare: 0,
     };
 
     await expect(vesting.allocate([badAlloc])).to.be.revertedWithCustomError(vesting, "ZeroAmount()");
@@ -155,6 +174,10 @@ describe("Vesting", () => {
 
     badAlloc.lockupPeriod = DAY * 50;
     await expect(vesting.allocate([badAlloc])).to.be.revertedWithCustomError(vesting, "IncorrectVestingPeriod()");
+
+    badAlloc.vestingPeriod = 1;
+    badAlloc.instantShare = 101;
+    await expect(vesting.allocate([badAlloc])).to.be.revertedWithCustomError(vesting, "IncorrectInstantShare()");
   });
 
   it("Should set vesting begin time", async () => {
@@ -184,6 +207,16 @@ describe("Vesting", () => {
     );
   });
 
+  it("Should revert setting the maintainer's status to the previous state", async () => {
+    await expect(vesting.updateMaintainer(adr1.address, false)).to.be.revertedWithCustomError(
+      vesting,
+      "NothingChanged"
+    );
+
+    await vesting.updateMaintainer(adr1.address, true);
+    await expect(vesting.updateMaintainer(adr1.address, true)).to.be.revertedWithCustomError(vesting, "NothingChanged");
+  });
+
   it("Checks restricted access", async () => {
     await expect(vesting.connect(adr1).lockVestingBegin())
       .to.be.revertedWithCustomError(vesting, "OwnableUnauthorizedAccount")
@@ -191,10 +224,11 @@ describe("Vesting", () => {
     await expect(vesting.connect(adr1).setVestingBegin(0))
       .to.be.revertedWithCustomError(vesting, "OwnableUnauthorizedAccount")
       .withArgs(adr1.address);
-    await expect(vesting.connect(adr1).allocate([alloc1]))
+    await expect(vesting.connect(adr1).allocate([alloc1])).to.be.revertedWithCustomError(vesting, "OnlyMaintainer");
+    await expect(vesting.connect(adr1).withdraw(testTokenAddress, adr1.address))
       .to.be.revertedWithCustomError(vesting, "OwnableUnauthorizedAccount")
       .withArgs(adr1.address);
-    await expect(vesting.connect(adr1).withdraw(testTokenAddress, adr1.address))
+    await expect(vesting.connect(adr1).updateMaintainer(adr1.address, true))
       .to.be.revertedWithCustomError(vesting, "OwnableUnauthorizedAccount")
       .withArgs(adr1.address);
   });
@@ -233,11 +267,6 @@ describe("Vesting", () => {
       }
 
       wrapLayer(vestingBegin);
-
-      it("Shouldn't let give allocation after vesting begin", async () => {
-        await timeShiftBy(ethers, DAY * 2);
-        await expect(vesting.allocate([alloc1])).to.be.revertedWithCustomError(vesting, "VestingAlreadyStarted()");
-      });
 
       it("Should revert setting time if vesting started", async () => {
         await timeShiftBy(ethers, DAY * 2);
@@ -383,6 +412,76 @@ describe("Vesting", () => {
           expect(await vesting.getAvailableBalanceOf(adr4.address)).to.eq(0);
         });
       });
+    });
+  });
+  context("Allocated with instant vesting", () => {
+    async function allocateAndBegin() {
+      await token.approve(vestingAddress, tokens("2600"));
+      alloc1.instantShare = 90n;
+      alloc2.instantShare = 70n;
+      alloc3.instantShare = 100n;
+      alloc4.instantShare = 10n;
+      alloc5.instantShare = 0n;
+      await vesting.allocate([alloc1, alloc2, alloc3, alloc4, alloc5]);
+
+      let { instantAmount, vestAmount } = calcAmounts(alloc1.vestAmount, alloc1.instantShare);
+      await expectTuple(
+        await vesting.vestings(1),
+        vestAmount,
+        instantAmount,
+        alloc1.lockupPeriod,
+        alloc1.vestingPeriod
+      );
+
+      beginTime = (await getBlockTime(ethers)) + MINUTE;
+      await vesting.setVestingBegin(beginTime);
+    }
+
+    wrapLayer(allocateAndBegin);
+    it("vesting stsart, get instant payouts vesting pass, get the rest of all vested amounts", async () => {
+      const balanceBefore1 = await token.balanceOf(adr1.address);
+      const balanceBefore2 = await token.balanceOf(adr2.address);
+      const balanceBefore3 = await token.balanceOf(adr3.address);
+      const balanceBefore4 = await token.balanceOf(adr4.address);
+      await timeShiftBy(ethers, DAY * 50 + MINUTE);
+
+      await vesting.connect(adr2).claim(adr2.address);
+      await vesting.connect(adr3).claim(adr3.address);
+      await vesting.connect(adr4).claim(adr4.address);
+
+      let Adr2Instant = (alloc2.vestAmount * BigInt(alloc2.instantShare)) / 100n;
+      let Adr3Instant = (alloc4.vestAmount * BigInt(alloc4.instantShare)) / 100n;
+      let Adr4Instant = (alloc5.vestAmount * BigInt(alloc5.instantShare)) / 100n;
+
+      expect(await token.balanceOf(adr2.address)).to.be.gt(balanceBefore2 + Adr2Instant);
+      expect(await token.balanceOf(adr3.address)).to.be.gt(balanceBefore3 + Adr3Instant);
+      expect(await token.balanceOf(adr4.address)).to.be.gt(balanceBefore4 + Adr4Instant);
+
+      // Allocation #2 pass rest of the time of lockup + vesting period
+      await timeShiftBy(ethers, DAY * 200);
+
+      await vesting.connect(adr2).claim(adr2.address);
+      expect(await token.balanceOf(adr2.address)).to.be.eq(balanceBefore2 + alloc2.vestAmount);
+
+      // Allocation #4, #5 pass rest of the time of lockup + vesting period
+      await timeShiftBy(ethers, DAY * 50);
+      await vesting.connect(adr3).claim(adr3.address);
+      await vesting.connect(adr4).claim(adr4.address);
+
+      expect(await token.balanceOf(adr3.address)).to.be.eq(balanceBefore3 + alloc4.vestAmount);
+      expect(await token.balanceOf(adr4.address)).to.be.eq(balanceBefore4 + alloc5.vestAmount);
+
+      // Allocation #1 pass 465 of lockup 100 + vesting period 365
+      // already passed 250, so pass 215 = 465 - 250
+      await timeShiftBy(ethers, DAY * 215);
+      await vesting.connect(adr1).claim(adr1.address);
+      expect(await token.balanceOf(adr1.address)).to.be.eq(balanceBefore1 + alloc1.vestAmount + alloc3.vestAmount);
+
+      // all claimed
+      expect(await vesting.getAvailableBalanceOf(adr1.address)).to.be.eq(0);
+      expect(await vesting.getAvailableBalanceOf(adr2.address)).to.be.eq(0);
+      expect(await vesting.getAvailableBalanceOf(adr3.address)).to.be.eq(0);
+      expect(await vesting.getAvailableBalanceOf(adr4.address)).to.be.eq(0);
     });
   });
 });
